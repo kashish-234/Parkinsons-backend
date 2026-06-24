@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from models.base.contracts import ModelOutput
-from .model import FOGModel
+from .model import load_components
 
 
 class GaitFOGModel:
@@ -10,14 +10,8 @@ class GaitFOGModel:
     MODEL_ID = "gait_cnn_lstm_v1"
 
     def __init__(self):
-        self.model = FOGModel()
-
-        # Load trained model weights
-        self.model.load_state_dict(
-            torch.load("gait_model.pt", map_location=torch.device("cpu"))
-        )
-
-        self.model.eval()
+        components = load_components()
+        self.model = components["model"]
 
     def predict(self, sample: np.ndarray) -> ModelOutput:
         """
