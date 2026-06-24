@@ -1,60 +1,95 @@
 import numpy as np
-import torch
-
-from models.base.contracts import ModelOutput
+import shap
+from models.base.contracts import (ModelOutput, SHAPFeature)
 from .model import load_components
+from .canonicalize import canonicalize
 
+class GaitDaphnetLGBM:
 
-class GaitFOGModel:
+    MODEL_ID = "gait_lgbm_v1"
+    VALIDATION_AUC = 0.0
 
-    MODEL_ID = "gait_cnn_lstm_v1"
-
-    def __init__(self):
+    def predict(self, raw_features: dict) -> ModelOutput:
         components = load_components()
-        self.model = components["model"]
+        cal_model = components["cal_model"]
+        scaler = components["scaler"]
+        metadata = components["metadata"]
 
-    def predict(self, sample: np.ndarray) -> ModelOutput:
-        """
-        Parameters
-        ----------
-        sample : np.ndarray
-            Preprocessed gait sample of shape (9, 128)
+        validation_auc = float(metadata["validation_auc"])
+        window_size = int(metadata["window_size"])
+        decision_threshold = 0.4
 
-        Returns
-        -------
-        ModelOutput
-        """
+        window = np.asarray(
+            raw_features["window"],
+            dtype=np.float64
+        )
 
-        if sample.ndim == 2:
-            sample = np.expand_dims(sample, axis=0)
+        window_flat = window.reshape(-1, window.shape[-1])
+        window_flat = scaler.transform(window_flat)
+        row = window_flat.reshape(1, -1)
 
-        x = torch.tensor(sample, dtype=torch.float32)
-
-        with torch.no_grad():
-            output = self.model(x)
-            probs = torch.softmax(output, dim=1)
-
-            probability = float(probs[0, 1])
-
-        predicted_label = int(probability >= 0.4)
+        prob = float(cal_model.predict_proba(row)[0, 1])
+        predicted_label = int(prob >= decision_threshold)
 
         eps = 1e-6
-        probability = min(max(probability, eps), 1 - eps)
+
+        p_clipped = min(max(prob, eps), 1 - eps)
 
         raw_logit = float(
-            np.log(probability / (1 - probability))
+            np.log(
+                p_clipped /
+                (1 - p_clipped)
+            )
         )
+
+        explainer = shap.TreeExplainer(cal_model.estimator)
+
+        shap_values = (explainer.shap_values(row))
+
+        if isinstance(shap_values, list):
+            shap_vals = np.asarray(shap_values[1][0])
+        else:
+            arr = np.asarray(shap_values)
+            shap_vals = (
+                arr[0, :, 1]
+                if arr.ndim == 3
+                else arr[0]
+            )
+
+        shap_vals = (shap_vals.ravel())
+
+        top_idx = np.argsort(
+            np.abs(shap_vals)
+        )[::-1][:10]
+
+        shap_features = []
+
+        for rank, idx in enumerate(top_idx, start=1):
+            timestep = int(idx) // window.shape[-1]
+            sensor = int(idx) % window.shape[-1]
+            raw_name = f"t{timestep}_s{sensor}"
+            shap_features.append(
+                SHAPFeature(
+                    name=canonicalize(raw_name),
+                    value=float(shap_vals[idx]),
+                    rank=rank,
+                )
+            )
+
+        mc_samples = []
 
         return ModelOutput(
             model_id=self.MODEL_ID,
             modality="gait",
             dataset="daphnet_fog",
-            probability=probability,
-            shap_features=[],
+            probability=prob,
+            shap_features=shap_features,
             raw_logit=raw_logit,
-            mc_samples=[],
+            mc_samples=mc_samples,
             metadata={
+                "n_features_used": row.shape[1],
                 "predicted_label": predicted_label,
-                "decision_threshold": 0.4,
+                "decision_threshold": float(decision_threshold),
+                "validation_auc": float(validation_auc),
             },
         )
