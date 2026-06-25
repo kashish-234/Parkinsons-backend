@@ -4,6 +4,7 @@ services:
     runtime: python
     region: oregon
     plan: free
+    pythonVersion: "3.11.10"
 
     buildCommand: >
       pip install --upgrade pip &&
@@ -16,22 +17,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.10
-
       - key: ENVIRONMENT
         value: production
-
       - key: DEBUG
         value: "false"
-
       - key: MODEL_CACHE_DIR
         value: /tmp/pd_models
-
-      # Configure these in the Render Dashboard (Environment),
-      # not in this file:
-      #
-      # SUPABASE_URL
-      # SUPABASE_SERVICE_KEY
-      # GEMINI_API_KEY
-      # HF_TOKEN
-      # HF_MODEL_REPO
-      # ALLOWED_ORIGINS
