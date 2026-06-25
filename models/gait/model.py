@@ -5,9 +5,7 @@ import joblib
 import torch
 import torch.nn as nn
 
-from services.model_storage_service import (
-    model_storage_service
-)
+from services.model_storage_service import model_storage_service
 
 
 # ── Model architecture ────────────────────────────────────────────────
@@ -15,25 +13,16 @@ from services.model_storage_service import (
 class ResidualBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels):
-
         super().__init__()
-
-        self.conv1 = nn.Conv1d(
-            in_channels, out_channels,
-            kernel_size=3, padding=1
-        )
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm1d(out_channels)
-
-        self.conv2 = nn.Conv1d(
-            out_channels, out_channels,
-            kernel_size=3, padding=1
-        )
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm1d(out_channels)
 
         if in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, kernel_size=1),
-                nn.BatchNorm1d(out_channels)
+                nn.BatchNorm1d(out_channels),
             )
         else:
             self.shortcut = nn.Identity()
@@ -48,9 +37,7 @@ class ResidualBlock(nn.Module):
 class FOGModel(nn.Module):
 
     def __init__(self):
-
         super().__init__()
-
         self.features = nn.Sequential(
             ResidualBlock(9, 32),
             nn.MaxPool1d(2),
@@ -61,7 +48,6 @@ class FOGModel(nn.Module):
             ResidualBlock(64, 128),
             nn.MaxPool1d(2),
         )
-
         self.lstm = nn.LSTM(
             input_size=128,
             hidden_size=128,
@@ -70,15 +56,12 @@ class FOGModel(nn.Module):
             dropout=0.30,
             batch_first=True,
         )
-
         self.attention = nn.Sequential(
             nn.Linear(256, 128),
             nn.Tanh(),
             nn.Linear(128, 1),
         )
-
         self.classifier = nn.Sequential(
-            nn.Dropout(0.40),
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(0.30),
@@ -86,17 +69,21 @@ class FOGModel(nn.Module):
         )
 
     def forward(self, x):
-        x = self.features(x)
-        x = x.permute(0, 2, 1)
-        outputs, _ = self.lstm(x)
-        weights = torch.softmax(self.attention(outputs), dim=1)
-        context = torch.sum(weights * outputs, dim=1)
-        return self.classifier(context)
+        # x: (batch, channels=9, time)
+        feat = self.features(x)            # (batch, 128, time//8)
+        feat = feat.permute(0, 2, 1)       # (batch, time//8, 128)
+        lstm_out, _ = self.lstm(feat)      # (batch, time//8, 256)
 
+        attn_weights = torch.softmax(
+            self.attention(lstm_out), dim=1
+        )                                  # (batch, time//8, 1)
+        context = (lstm_out * attn_weights).sum(dim=1)  # (batch, 256)
 
-# ── Temperature scaler ────────────────────────────────────────────────
+        return self.classifier(context)    # (batch, 2)
+
 
 class TemperatureScaler(nn.Module):
+    """Learned post-hoc calibration via a single temperature parameter."""
 
     def __init__(self):
         super().__init__()
@@ -110,52 +97,55 @@ class TemperatureScaler(nn.Module):
 
 @lru_cache(maxsize=1)
 def load_components():
+    """
+    Download and return all gait model components.
 
+    Paths corrected to match the actual HuggingFace repo layout (flat
+    under 'gait/', not nested under 'gait/daphnet/').
+    """
     # ── PyTorch model ─────────────────────────────────────────────────
-    model_path = model_storage_service.download_model(
-        "gait/daphnet/gait_model.pt"
-    )
+    model_path = model_storage_service.download_model("gait/gait_model.pt")
     model = FOGModel()
     model.load_state_dict(
-        torch.load(model_path, map_location="cpu")
+        torch.load(model_path, map_location="cpu", weights_only=True)
     )
     model.eval()
 
     # ── Temperature scaler ────────────────────────────────────────────
-    ts_path = model_storage_service.download_model(
-        "gait/daphnet/temperature_scaler.pt"
-    )
+    ts_path = model_storage_service.download_model("gait/temperature_scaler.pt")
     temperature_scaler = TemperatureScaler()
     temperature_scaler.load_state_dict(
-        torch.load(ts_path, map_location="cpu")
+        torch.load(ts_path, map_location="cpu", weights_only=True)
     )
     temperature_scaler.eval()
 
     # ── sklearn scaler ────────────────────────────────────────────────
-    scaler_path = model_storage_service.download_model(
-        "gait/daphnet/scaler.pkl"
-    )
+    scaler_path = model_storage_service.download_model("gait/scaler.pkl")
     scaler = joblib.load(scaler_path)
 
-    # ── SHAP background ───────────────────────────────────────────────
-    # Load real training samples saved during training (background.pt).
-    # Falls back to zeros if the artifact is absent, but real-data
-    # backgrounds produce more meaningful SHAP attributions.
-    # Kept on CPU — GradientExplainer must run on CPU for SHAP compat.
-    try:
-        background_path = model_storage_service.download_model(
-            "gait/daphnet/background.pt"
-        )
-        background = torch.load(background_path, map_location="cpu")
-    except Exception:
-        background = torch.zeros(1, 9, 256)
-
     # ── Metadata ──────────────────────────────────────────────────────
-    metadata_path = model_storage_service.download_model(
-        "gait/daphnet/metadata.json"
-    )
+    metadata_path = model_storage_service.download_model("gait/metadata.json")
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+
+    # ── Decision threshold & validation AUC (separate pkl artefacts) ──
+    try:
+        dt_path = model_storage_service.download_model("gait/decision_threshold.pkl")
+        metadata["decision_threshold"] = float(joblib.load(dt_path))
+    except Exception:
+        # Fall back to value embedded in metadata.json
+        pass
+
+    try:
+        auc_path = model_storage_service.download_model("gait/validation_auc.pkl")
+        metadata["validation_auc"] = float(joblib.load(auc_path))
+    except Exception:
+        pass
+
+    # ── SHAP background ───────────────────────────────────────────────
+    # No background.pt in this HF repo; use a zero tensor as baseline.
+    # GradientExplainer still produces directionally correct attributions.
+    background = torch.zeros(1, 9, int(metadata.get("window_size", 256)))
 
     return {
         "model": model,

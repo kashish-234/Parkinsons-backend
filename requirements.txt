@@ -1,66 +1,57 @@
-# FastAPI & Web Framework
+# ── Web Framework ─────────────────────────────────────────────────────────────
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 pydantic-settings==2.2.1
 pydantic==2.5.0
 
-# Auth & Security
+# ── Auth ──────────────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
 cryptography==41.0.7
 
-# Database / Storage
+# ── Database / Storage ────────────────────────────────────────────────────────
 supabase==2.4.6
+requests==2.31.0
 
-# HuggingFace model loading
+# ── HuggingFace ───────────────────────────────────────────────────────────────
 huggingface-hub==0.23.0
 
-# ML Core
+# ── ML Core ───────────────────────────────────────────────────────────────────
 joblib==1.4.0
 numpy==1.26.4
 pandas==2.2.2
 scikit-learn==1.5.0
 scipy==1.13.0
 
-# Gradient Boosting
+# ── Gradient Boosting ─────────────────────────────────────────────────────────
 lightgbm==4.3.0
 xgboost==2.0.3
 
-# Model Explainability
+# ── Explainability ────────────────────────────────────────────────────────────
 shap==0.45.0
 
-# Audio/Speech Processing
+# ── Audio/Speech ──────────────────────────────────────────────────────────────
 librosa==0.10.1
 soundfile==0.12.1
 
-# Deep Learning - PyTorch (for gait CNN-LSTM, handwriting)
+# ── Deep Learning — PyTorch CPU (Render free tier has no GPU) ─────────────────
+# Install CPU-only torch to keep slug size manageable.
+# Add --extra-index-url in render.yaml (see below).
 torch==2.1.2
 torchvision==0.16.2
-torchaudio==2.1.2
 
-# Deep Learning - TensorFlow (for handwriting DenseNet201)
-tensorflow==2.15.0
+# ── Deep Learning — TensorFlow ────────────────────────────────────────────────
+tensorflow-cpu==2.15.0
 
-# Image Processing
+# ── Image Processing ──────────────────────────────────────────────────────────
 pillow==10.1.0
 
-# Report Generation
+# ── Report Generation ─────────────────────────────────────────────────────────
 google-generativeai==0.5.4
 
-# HTTP Requests
-requests==2.31.0
-
-# Logging & Monitoring
-python-json-logger==2.0.7
-
-# Development (optional)
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.12.0
-flake8==6.1.0
-
-# Pydantic v2 type support
+# ── Serialisation ─────────────────────────────────────────────────────────────
+protobuf>=3.20,<5
 typing-extensions>=4.8
 
-# TensorFlow 2.15 requires protobuf < 5
-protobuf>=3.20,<5
+# ── Logging ───────────────────────────────────────────────────────────────────
+python-json-logger==2.0.7

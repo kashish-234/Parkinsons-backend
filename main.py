@@ -120,7 +120,6 @@ def root():
     return {"status": "running", "service": "PD Detection Backend", "version": "1.0.0"}
 
 
-# FIX C1: Must return a JSONResponse, not a bare (dict, int) tuple.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(

@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     # Gemini (GenAI)
     gemini_api_key: str
 
-    # HuggingFace
-    hf_token: str
+    # HuggingFace — token is optional for public repos
+    hf_token: Optional[str] = None
     hf_model_repo: str = "Kashish-jain/Parkinsons-trained-models"
 
     # Optional
@@ -22,13 +22,20 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
 
-    # Model cache — /tmp is writable on Render; artifacts are re-downloaded
-    # on each new worker instance (cold start). For faster cold starts,
-    # consider Render persistent disks or pre-warming via the lifespan hook.
+    # Model cache
+    # Render free tier: /tmp is ephemeral (reset on restart / spin-up).
+    # To avoid re-downloading models on every cold start, attach a Render
+    # Persistent Disk and set MODEL_CACHE_DIR=/mnt/pd_models in the env.
     model_cache_dir: str = "/tmp/pd_models"
+
+    # Server
+    port: int = 8000
 
     class Config:
         env_file = Path(__file__).resolve().parent.parent / ".env"
+        env_file_encoding = "utf-8"
+        # Accept both lower-case and UPPER_CASE env var names
+        case_sensitive = False
 
 
 settings = Settings()

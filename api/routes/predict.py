@@ -1,5 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 import os
+import shutil
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+
 from core.auth import verify_user
 from api.schemas import PredictRequest, PredictResponse
 from services.inference_pipeline import run_inference
@@ -15,11 +17,13 @@ async def predict(
     background_tasks: BackgroundTasks,
     user=Depends(verify_user),
 ):
+    user_id = data.patient_id  # patient_id from body; user_id from JWT
     user_id = user["user_id"]
-    job_id = data.job_id
 
-    tmp_dir = f"/tmp/{job_id}"
-    os.makedirs(tmp_dir, exist_ok=True)
+    # Use a staging dir keyed by the client-supplied job_id (just for
+    # the Supabase Storage downloads; the pipeline uses its own uuid).
+    staging_dir = f"/tmp/staging_{data.job_id}"
+    os.makedirs(staging_dir, exist_ok=True)
 
     input_paths: dict = {}
 
@@ -27,26 +31,41 @@ async def predict(
         modality_files = []
         for path in paths:
             filename = os.path.basename(path)
-            local_path = f"{tmp_dir}/{modality}_{filename}"
+            local_path = f"{staging_dir}/{modality}_{filename}"
             try:
                 download_file(path, local_path)
                 modality_files.append(local_path)
-            except Exception:
+            except Exception as e:
+                # Log and skip; modality will be marked unavailable downstream
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Could not download {path}: {e}"
+                )
                 continue
         input_paths[modality] = modality_files
 
     try:
         fused = run_inference(data.patient_id, input_paths)
     except ValueError as e:
+        shutil.rmtree(staging_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Always clean up staging dir
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     background_tasks.add_task(persist_fused_result, fused, user_id)
 
-    # FIX H5: The key set by run_inference is "confidence_warning", not "warning".
     warning = None
     if fused.report_json:
-        warning = fused.report_json.get("confidence_warning") or fused.report_json.get("warning")
+        warning = (
+            fused.report_json.get("confidence_warning")
+            or fused.report_json.get("warning")
+        )
 
+    # FIX: use fused.job_id (the one written to DB) not data.job_id
     return PredictResponse(
         job_id=fused.job_id,
         patient_id=fused.patient_id,

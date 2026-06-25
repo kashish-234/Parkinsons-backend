@@ -1,24 +1,27 @@
-from supabase import create_client
-from models.base.contracts import FusedResult
 import logging
+import time
+from supabase import create_client, Client
+from models.base.contracts import FusedResult
 
 logger = logging.getLogger(__name__)
 
 from core.config import settings
 
-_client = None
+_client: Client | None = None
+_client_created_at: float = 0
+# Re-create the client every 30 min to avoid stale connections on Render
+_CLIENT_TTL_SECONDS = 1800
 
 
-def get_client():
-    global _client
-    if _client is None:
+def get_client() -> Client:
+    global _client, _client_created_at
+    if _client is None or time.time() - _client_created_at > _CLIENT_TTL_SECONDS:
         _client = create_client(settings.supabase_url, settings.supabase_service_key)
+        _client_created_at = time.time()
     return _client
 
 
-# ---------------------------------------------------------------------------
-# SAVE RESULTS
-# ---------------------------------------------------------------------------
+# ── Save results ────────────────────────────────────────────────────────────
 
 def persist_fused_result(result: FusedResult, user_id: str):
     db = get_client()
@@ -33,6 +36,8 @@ def persist_fused_result(result: FusedResult, user_id: str):
             "ci_high":              result.ci_high,
             "modality_weights":     result.modality_weights,
             "fusion_model_version": result.fusion_model_version,
+            # FIX: persist report_json (contains confidence_warning etc.)
+            "report_json":          result.report_json,
         }).execute()
 
         for mr in result.modality_results:
@@ -50,13 +55,15 @@ def persist_fused_result(result: FusedResult, user_id: str):
                 "available":     mr.available,
             }).execute()
 
-            vec = [f.value for f in mr.shap_features[:10]]
-            vec += [0.0] * (10 - len(vec))
+            # Build a fixed-length float vector for pgvector (dim=10)
+            shap_vals = [float(f.value) for f in mr.shap_features[:10]]
+            shap_vals += [0.0] * (10 - len(shap_vals))  # zero-pad to 10
+
             db.table("shap_embeddings").insert({
                 "job_id":    result.job_id,
                 "modality":  mr.modality,
                 "content":   f"{mr.modality} SHAP features for job {result.job_id}",
-                "embedding": vec,
+                "embedding": shap_vals,  # list[float] — pgvector expects this
             }).execute()
 
         logger.info(f"Persisted job {result.job_id} for user {user_id}")
@@ -66,10 +73,7 @@ def persist_fused_result(result: FusedResult, user_id: str):
         raise
 
 
-# ---------------------------------------------------------------------------
-# FETCH RESULT
-# FIX H4: Also fetch modality_results rows and attach them.
-# ---------------------------------------------------------------------------
+# ── Fetch result ─────────────────────────────────────────────────────────────
 
 def get_result(job_id: str, user_id: str):
     db = get_client()
@@ -86,7 +90,6 @@ def get_result(job_id: str, user_id: str):
 
     row = res.data[0]
 
-    # Attach modality_results from the separate table
     mr_res = (
         db.table("modality_results")
         .select("*")
@@ -98,9 +101,7 @@ def get_result(job_id: str, user_id: str):
     return row
 
 
-# ---------------------------------------------------------------------------
-# FETCH REPORT
-# ---------------------------------------------------------------------------
+# ── Fetch report ──────────────────────────────────────────────────────────────
 
 def get_report(job_id: str):
     db = get_client()
@@ -115,9 +116,7 @@ def get_report(job_id: str):
     return res.data[0] if res.data else None
 
 
-# ---------------------------------------------------------------------------
-# FETCH SHAP EMBEDDINGS FOR RAG
-# ---------------------------------------------------------------------------
+# ── Fetch SHAP embeddings for RAG ─────────────────────────────────────────────
 
 def get_modality_embeddings_for_job(job_id: str) -> dict:
     db = get_client()
