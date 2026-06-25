@@ -1,0 +1,41 @@
+# fastapi==0.111.0
+# uvicorn[standard]==0.29.0
+# python-multipart==0.0.9
+# pydantic-settings==2.2.1
+# anthropic==0.28.0
+# supabase==2.4.6
+# huggingface-hub==0.23.0
+# joblib==1.4.0
+# numpy==1.26.4
+# pandas==2.2.2
+# scipy==1.13.0
+# scikit-learn==1.4.2
+# xgboost==2.0.3
+# lightgbm==4.3.0
+# shap==0.45.0
+# opensmile==2.4.2
+# mne==1.7.0
+# pyedflib==0.1.36
+# nibabel==5.2.1
+# nilearn==0.10.3
+
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+supabase
+huggingface-hub
+joblib
+numpy
+pandas
+scikit-learn
+scipy
+torch
+light-gbm
+xgboost
+shap
+transformers
+librosa
+soundfile
+google-generativeai
+matplotlib
