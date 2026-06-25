@@ -8,6 +8,7 @@ from core.config import settings
 
 _client = None
 
+
 def get_client():
     global _client
     if _client is None:
@@ -25,6 +26,7 @@ def get_client():
 def persist_fused_result(result: FusedResult, user_id: str):
     db = get_client()
     try:
+        # fused_results — all columns exist in schema
         db.table("fused_results").insert({
             "job_id":               result.job_id,
             "user_id":              user_id,
@@ -42,19 +44,14 @@ def persist_fused_result(result: FusedResult, user_id: str):
                 continue
 
             db.table("modality_results").insert({
-                "job_id":       result.job_id,
-                "modality":     mr.modality,
-                "probability":  mr.probability,
-                "ci_low":       mr.ci_low,
-                "ci_high":      mr.ci_high,
-                "ci_width":     mr.ci_width,
+                "job_id":        result.job_id,
+                "modality":      mr.modality,
+                "probability":   mr.probability,
                 "shap_features": [
                     {"name": f.name, "value": f.value, "rank": f.rank}
                     for f in mr.shap_features
                 ],
-                "model_ids":    mr.model_ids,
-                "available":    mr.available,
-                "metadata":     mr.metadata,
+                "available":     mr.available,
             }).execute()
 
             # SHAP embedding vector for RAG (pad / truncate to 10 dims)
@@ -109,7 +106,6 @@ def get_report(job_id: str):
 
 # ---------------------------------------------------------------------------
 # FETCH SHAP EMBEDDINGS FOR RAG
-# FIX: this function was imported by report.py but didn't exist — crashed on import
 # ---------------------------------------------------------------------------
 
 def get_modality_embeddings_for_job(job_id: str) -> dict[str, list[float]]:

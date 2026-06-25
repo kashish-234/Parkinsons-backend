@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from typing import Optional
 from pathlib import Path
 
+
 class Settings(BaseSettings):
     # Supabase
     supabase_url: str
@@ -12,7 +13,7 @@ class Settings(BaseSettings):
 
     # HuggingFace
     hf_token: str
-    hf_model_repo: str = "your-org/pd-models"
+    hf_model_repo: str = "Kashish-jain/Parkinsons-trained-models"
 
     # Optional
     cron_secret: Optional[str] = None
@@ -21,7 +22,9 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
 
-    # Model cache
+    # Model cache — /tmp is writable on Render; artifacts are re-downloaded
+    # on each new worker instance (cold start). For faster cold starts,
+    # consider Render persistent disks or pre-warming via the lifespan hook.
     model_cache_dir: str = "/tmp/pd_models"
 
     class Config:

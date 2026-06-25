@@ -1,41 +1,60 @@
-# fastapi==0.111.0
-# uvicorn[standard]==0.29.0
-# python-multipart==0.0.9
-# pydantic-settings==2.2.1
-# anthropic==0.28.0
-# supabase==2.4.6
-# huggingface-hub==0.23.0
-# joblib==1.4.0
-# numpy==1.26.4
-# pandas==2.2.2
-# scipy==1.13.0
-# scikit-learn==1.4.2
-# xgboost==2.0.3
-# lightgbm==4.3.0
-# shap==0.45.0
-# opensmile==2.4.2
-# mne==1.7.0
-# pyedflib==0.1.36
-# nibabel==5.2.1
-# nilearn==0.10.3
+# FastAPI & Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+pydantic-settings==2.2.1
+pydantic==2.5.0
 
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic-settings
-supabase
-huggingface-hub
-joblib
-numpy
-pandas
-scikit-learn
-scipy
-torch
-light-gbm
-xgboost
-shap
-transformers
-librosa
-soundfile
-google-generativeai
-matplotlib
+# Auth & Security
+python-jose[cryptography]==3.3.0
+cryptography==41.0.7
+
+# Database / Storage
+supabase==2.4.6
+
+# HuggingFace model loading
+huggingface-hub==0.23.0
+
+# ML Core
+joblib==1.4.0
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.0
+scipy==1.13.0
+
+# Gradient Boosting
+lightgbm==4.3.0
+xgboost==2.0.3
+
+# Model Explainability
+shap==0.45.0
+
+# Audio/Speech Processing
+librosa==0.10.1
+soundfile==0.12.1
+
+# Deep Learning - PyTorch (for gait CNN-LSTM, handwriting)
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+
+# Deep Learning - TensorFlow (for handwriting DenseNet201)
+tensorflow==2.15.0
+
+# Image Processing
+pillow==10.1.0
+
+# Report Generation
+google-generativeai==0.5.4
+
+# HTTP Requests
+requests==2.31.0
+
+# Logging & Monitoring
+python-json-logger==2.0.7
+
+# Development (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.12.0
+flake8==6.1.0
