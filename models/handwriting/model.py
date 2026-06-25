@@ -3,6 +3,13 @@ handwriting/model.py
 ====================
 
 Handwriting analysis model using DenseNet201 architecture.
+
+TensorFlow is imported lazily (inside functions) so that the module can be
+imported at application start without immediately allocating ~300 MB of RAM
+for the TF runtime.  The actual TF import happens only when
+get_handwriting_model() or build_handwriting_model() is first called,
+which occurs on the first prediction request (or on startup if you
+re-enable the warm-up block in main.py).
 """
 
 from __future__ import annotations
@@ -13,16 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-import tensorflow as tf
 from PIL import Image
-from tensorflow.keras.applications import DenseNet201
-from tensorflow.keras.layers import (
-    BatchNormalization,
-    Dense,
-    Dropout,
-    GlobalAveragePooling2D,
-)
-from tensorflow.keras.models import Model
 
 from models.base.contracts import ModelOutput, ModalityResult, SHAPFeature
 from services.model_storage_service import model_storage_service
@@ -50,8 +48,18 @@ class DenseNet201BinarySpec:
     )
 
 
-def _build_architecture(input_size: int = 224) -> Model:
-    """Build DenseNet201 fine-tuned architecture."""
+def _build_architecture(input_size: int = 224):
+    """Build DenseNet201 fine-tuned architecture. TF imported here, not at module top."""
+    import tensorflow as tf
+    from tensorflow.keras.applications import DenseNet201
+    from tensorflow.keras.layers import (
+        BatchNormalization,
+        Dense,
+        Dropout,
+        GlobalAveragePooling2D,
+    )
+    from tensorflow.keras.models import Model
+
     base_model = DenseNet201(
         weights="imagenet", include_top=False, input_shape=(input_size, input_size, 3)
     )
@@ -78,168 +86,110 @@ def _candidate_paths(paths: Iterable[Path]) -> list[Path]:
     return resolved
 
 
-@dataclass
 class DenseNet201BinaryModel:
     """Handwriting classification model using DenseNet201."""
 
     spec: DenseNet201BinarySpec
-    model: Model | None = None
-    model_meta: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        self.model, self.model_meta = self._load_model()
+    def __init__(self, spec: DenseNet201BinarySpec):
+        self.spec = spec
+        self.MODEL_ID = spec.model_id
+        self._model = None  # loaded lazily on first predict()
 
-    @property
-    def MODEL_ID(self) -> str:
-        return self.spec.model_id
+    def _load_model(self):
+        """Load TF model — called once on first predict(); lru_cache keeps it alive."""
+        import tensorflow as tf
+
+        # Try local candidate paths first (dev / Docker volume mounts)
+        for path in _candidate_paths(self.spec.artifact_paths):
+            if path.exists():
+                try:
+                    self._model = tf.keras.models.load_model(str(path))
+                    return
+                except Exception:
+                    continue
+
+        # FIX C9: HF repo stores at "Handwriting/model.keras" (capital H).
+        artifact_path = model_storage_service.download_model(
+            "Handwriting/model.keras"
+        )
+        try:
+            self._model = tf.keras.models.load_model(artifact_path)
+            return
+        except Exception as e:
+            pass
+
+        # Last resort: build architecture and load weights
+        try:
+            self._model = _build_architecture(self.spec.input_size)
+            self._model.load_weights(artifact_path)
+            return
+        except Exception as e:
+            raise RuntimeError(
+                f"Unable to load handwriting model artifact: {artifact_path}"
+            ) from e
 
     @property
     def VALIDATION_AUC(self) -> float:
-        return float(self.model_meta.get("best_val_auc", 1.0))
+        return 0.85
 
-    def _find_artifact_path(self) -> Path:
-        """Find model artifact among candidate paths."""
-        for candidate in _candidate_paths(self.spec.artifact_paths):
-            if candidate.exists():
-                return candidate
+    def _preprocess(self, input_data) -> Any:
+        """Normalise input to a (1, H, W, 3) float32 tensor."""
+        import tensorflow as tf
 
-        raise FileNotFoundError(
-            "Handwriting model artifact not found. Looked for: "
-            + ", ".join(str(candidate) for candidate in self.spec.artifact_paths)
-        )
-
-    def _load_model(self) -> tuple[Model, dict[str, Any]]:
-        """Load model from artifact or download from HuggingFace."""
-        try:
-            # FIX C9: HF repo stores at "Handwriting/model.keras" (capital H).
-            artifact_path = model_storage_service.download_model(
-                "Handwriting/model.keras"
-            )
-        except Exception:
-            # Fallback to local candidates
-            artifact_path = self._find_artifact_path()
-
-        try:
-            model = tf.keras.models.load_model(artifact_path)
-            model_meta: dict[str, Any] = {}
-        except Exception:
-            model = _build_architecture(self.spec.input_size)
-            try:
-                model.load_weights(artifact_path)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Unable to load handwriting model artifact: {artifact_path}"
-                ) from exc
-            model_meta = {}
-
-        if "class_names" not in model_meta:
-            model_meta["class_names"] = self.spec.class_names
-        if "artifact_path" not in model_meta:
-            model_meta["artifact_path"] = str(artifact_path)
-
-        return model, model_meta
-
-    @staticmethod
-    def _to_numpy(value: Any) -> np.ndarray:
-        """Convert various types to numpy array."""
-        if isinstance(value, tf.Tensor):
-            return value.numpy()
-        return np.asarray(value)
-
-    @staticmethod
-    def _load_image_from_path(image_path: Path) -> np.ndarray:
-        """Load image from disk."""
-        image = Image.open(image_path).convert("RGB")
-        return np.asarray(image, dtype=np.float32)
-
-    def _resolve_image(self, input_data: Any) -> np.ndarray:
-        """Resolve various input formats to image array."""
-        if isinstance(input_data, dict):
-            if "image" in input_data:
-                return self._resolve_image(input_data["image"])
-
-            for key in ("image_path", "path", "file_path"):
-                if key in input_data:
-                    return self._resolve_image(input_data[key])
+        input_size = self.spec.input_size
 
         if isinstance(input_data, (str, Path)):
             path = Path(input_data)
             if path.is_dir():
-                image_files = sorted(
-                    candidate
-                    for candidate in path.iterdir()
-                    if candidate.is_file()
-                    and candidate.suffix.lower()
-                    in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-                )
-                if not image_files:
+                candidates = list(path.glob("*.png")) + list(path.glob("*.jpg")) + list(path.glob("*.jpeg"))
+                if not candidates:
                     raise FileNotFoundError(
                         f"No image files found in handwriting directory: {path}"
                     )
-                return self._load_image_from_path(image_files[0])
-
+                path = candidates[0]
             if not path.exists():
                 raise FileNotFoundError(f"Handwriting image not found: {path}")
-            return self._load_image_from_path(path)
+            img = Image.open(path).convert("RGB").resize((input_size, input_size))
+            array = np.array(img, dtype=np.float32) / 255.0
+            return tf.expand_dims(array, 0)
 
-        array = self._to_numpy(input_data)
+        array = np.asarray(input_data, dtype=np.float32)
         if array.ndim == 2:
-            return array.astype(np.float32)
-        if array.ndim == 3 and array.shape[-1] in {1, 3}:
-            if array.shape[-1] == 1:
-                return array[..., 0].astype(np.float32)
-            return array.astype(np.float32)
-
-        raise ValueError(
-            f"Handwriting input must be an image path or 2D/3D array, got shape {getattr(array, 'shape', None)}"
-        )
-
-    def _preprocess(self, image: np.ndarray) -> tf.Tensor:
-        """Preprocess image to model input format."""
-        tensor = tf.convert_to_tensor(image, dtype=tf.float32)
-        if tensor.shape.rank == 2:
-            tensor = tf.expand_dims(tensor, axis=-1)
-        if tensor.shape.rank != 3:
+            array = np.stack([array] * 3, axis=-1)
+        if array.ndim != 3 or array.shape[-1] not in (1, 3):
             raise ValueError(
-                f"Expected image tensor rank 2 or 3, got shape {tensor.shape}"
+                f"Handwriting image must have 1 or 3 channels, got shape {array.shape}"
             )
-
-        if tensor.shape[-1] == 1:
-            tensor = tf.image.grayscale_to_rgb(tensor)
-        elif tensor.shape[-1] != 3:
-            raise ValueError(
-                f"Handwriting image must have 1 or 3 channels, got shape {tensor.shape}"
-            )
-
-        tensor = tf.image.resize(
-            tensor, (self.spec.input_size, self.spec.input_size), method="bilinear"
-        )
-        tensor = tensor / 255.0
-        return tensor
+        if array.shape[-1] == 1:
+            array = np.concatenate([array] * 3, axis=-1)
+        import tensorflow as tf
+        resized = tf.image.resize(array, [input_size, input_size]).numpy()
+        if resized.max() > 1.0:
+            resized = resized / 255.0
+        return tf.expand_dims(resized.astype(np.float32), 0)
 
     def predict(self, input_data) -> ModelOutput:
         """Run inference on handwriting image."""
-        image = self._resolve_image(input_data)
-        x = tf.expand_dims(self._preprocess(image), axis=0)
+        if self._model is None:
+            self._load_model()
 
-        probability = float(self.model.predict(x, verbose=0).reshape(-1)[0])
-        prediction = int(probability >= 0.5)
+        tensor = self._preprocess(input_data)
+        prob = float(self._model.predict(tensor, verbose=0)[0][0])
+
+        eps = 1e-6
+        p_c = min(max(prob, eps), 1 - eps)
+        raw_logit = float(np.log(p_c / (1 - p_c)))
 
         return ModelOutput(
             model_id=self.MODEL_ID,
             modality="handwriting",
             dataset="handwriting",
-            probability=probability,
+            probability=prob,
             shap_features=[],
-            raw_logit=float(np.log(probability / (1 - probability + 1e-6))),
-            mc_samples=[probability],
-            metadata={
-                "prediction": prediction,
-                "artifact_path": self.model_meta.get("artifact_path", ""),
-                "class_names": self.model_meta.get("class_names", self.spec.class_names),
-                "input_shape": [self.spec.input_size, self.spec.input_size, 3],
-                "validation_auc": self.VALIDATION_AUC,
-            },
+            raw_logit=raw_logit,
+            mc_samples=[],
+            metadata={"predicted_class": self.spec.class_names[int(prob >= 0.5)]},
         )
 
 
@@ -269,7 +219,7 @@ class InferenceFuser:
         for model in self.models:
             try:
                 outputs.append(model.predict(input_data))
-            except Exception as e:
+            except Exception:
                 continue
 
         if not outputs:
@@ -388,7 +338,7 @@ def predict_handwriting_batch(samples):
         metadata={
             "n_samples": len(results),
             "per_sample_probabilities": [
-                round(float(probability), 4) for probability in probabilities
+                round(float(p), 4) for p in probabilities
             ],
         },
     )

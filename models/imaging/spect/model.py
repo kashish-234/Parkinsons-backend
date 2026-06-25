@@ -1,3 +1,9 @@
+"""
+imaging/spect/model.py
+
+PyTorch is imported lazily inside load_spect_components() so that importing
+this module at application startup does not immediately allocate PyTorch RAM.
+"""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -5,197 +11,179 @@ import json
 import logging
 import pickle
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
-import torch
-import torchvision.transforms as transforms
 from PIL import Image
-from torchvision.models import resnet18
 
 from services.model_storage_service import model_storage_service
 from models.base.contracts import ModelOutput, SHAPFeature
 
 logger = logging.getLogger(__name__)
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+def _get_torch():
+    import torch
+    return torch
+
+def _get_transforms():
+    import torchvision.transforms as transforms
+    return transforms
+
+def _get_resnet18():
+    from torchvision.models import resnet18
+    return resnet18
 
 
 class SPECTResNet18Model:
     """
-    ResNet18-based model for SPECT classification (PD vs HC).
-
+    ResNet18 fine-tuned for DAT-SPECT PD classification.
     Artifacts live under 'neuroimaging/dat-spect/' in the HF repo.
     """
 
     MODEL_ID = "spect_resnet18_v1"
 
     def __init__(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._metadata: dict = {}
-        self._calibrator = None
-        self.model = self._load_model()
-        self.transforms = self._build_transforms()
-        self.VALIDATION_AUC: float = float(
-            self._metadata.get("validation_auc", 0.89)
-        )
+        self._components = None
 
-    def _build_transforms(self) -> transforms.Compose:
-        return transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
-
-    def _load_model(self) -> torch.nn.Module:
-        """Load ResNet18 from the combined pkl artifact under dat-spect/."""
-        # Primary: combined artifact
-        try:
-            artifact_path = model_storage_service.download_model(
-                "neuroimaging/dat-spect/spect_model_artifact.pkl"
-            )
-            with open(artifact_path, "rb") as f:
-                artifact = pickle.load(f)
-
-            net = resnet18(num_classes=2)
-            net.load_state_dict(artifact["state_dict"])
-            net.to(self.device)
-            net.eval()
-
-            self._calibrator = artifact.get("calibrator")
-            self._metadata = artifact.get("metadata", {})
-
-            try:
-                meta_path = model_storage_service.download_model(
-                    "neuroimaging/dat-spect/metadata.json"
-                )
-                with open(meta_path) as f:
-                    self._metadata.update(json.load(f))
-            except Exception:
-                pass
-
-            logger.info("SPECT model loaded from spect_model_artifact.pkl")
-            return net
-
-        except Exception as e:
-            logger.warning(f"spect_model_artifact.pkl failed ({e}), trying model.pt ...")
-
-        # Fallback: raw state dict
-        model_path = model_storage_service.download_model(
-            "neuroimaging/dat-spect/model.pt"
-        )
-        net = resnet18(num_classes=2)
-        net.load_state_dict(
-            torch.load(model_path, map_location=self.device, weights_only=True)
-        )
-        net.to(self.device)
-        net.eval()
-
-        try:
-            cal_path = model_storage_service.download_model(
-                "neuroimaging/dat-spect/calibrator.pkl"
-            )
-            import joblib
-            self._calibrator = joblib.load(cal_path)
-        except Exception:
-            pass
-
-        try:
-            meta_path = model_storage_service.download_model(
-                "neuroimaging/dat-spect/metadata.json"
-            )
-            with open(meta_path) as f:
-                self._metadata = json.load(f)
-        except Exception:
-            pass
-
-        logger.info("SPECT model loaded from model.pt (fallback)")
-        return net
+    def _load(self):
+        if self._components is None:
+            self._components = load_spect_components()
 
     def predict(self, input_data) -> ModelOutput:
-        """Run inference on a SPECT scan image."""
-        image_array = self._resolve_input(input_data)
+        self._load()
+        torch = _get_torch()
+        transforms = _get_transforms()
+        model      = self._components["model"]
+        calibrator = self._components["calibrator"]
+        metadata   = self._components["metadata"]
+        shap_ref   = self._components.get("shap_reference_batch")
 
-        if image_array.ndim == 2:
-            image_array = np.expand_dims(image_array, axis=-1)
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
 
-        lo, hi = image_array.min(), image_array.max()
-        image_array = (image_array - lo) / (hi - lo + 1e-8)
+        path = input_data if isinstance(input_data, str) else input_data.get("spect")
+        img = Image.open(path).convert("RGB")
+        tensor = transform(img).unsqueeze(0)
 
-        # Convert to RGB for ResNet18
-        pil_image = Image.fromarray(
-            (image_array[:, :, 0] * 255).astype(np.uint8)
-        ).convert("RGB")
-
-        tensor_input = self.transforms(pil_image).unsqueeze(0).to(self.device)
-
+        model.eval()
         with torch.no_grad():
-            logits = self.model(tensor_input)
-            probs = torch.softmax(logits, dim=1)
+            logits = model(tensor)
+            prob_raw = torch.softmax(logits, dim=1)[0, 1].item()
 
-        prob_pd_raw = float(probs[0, 1].item())
+        prob = float(calibrator.predict_proba([[prob_raw]])[0, 1]) \
+            if calibrator is not None else float(prob_raw)
 
-        if self._calibrator is not None:
+        eps = 1e-6
+        p_c = min(max(prob, eps), 1 - eps)
+        raw_logit = float(np.log(p_c / (1 - p_c)))
+
+        shap_features = []
+        if shap_ref is not None:
             try:
-                prob_pd = float(
-                    self._calibrator.predict_proba(np.array([[prob_pd_raw]]))[0, 1]
-                )
-            except Exception:
-                prob_pd = prob_pd_raw
-        else:
-            prob_pd = prob_pd_raw
-
-        # FIX: assign predicted_label before referencing in metadata
-        predicted_label = int(prob_pd >= 0.5)
+                import shap
+                explainer = shap.GradientExplainer(model, shap_ref)
+                sv = explainer.shap_values(tensor)
+                vals = np.asarray(sv[1] if isinstance(sv, list) else sv)[0]
+                flat = vals.ravel()
+                top = np.argsort(np.abs(flat))[::-1][:10]
+                shap_features = [
+                    SHAPFeature(name=f"pixel_{i}", value=float(flat[i]), rank=r)
+                    for r, i in enumerate(top, 1)
+                ]
+            except Exception as e:
+                logger.warning(f"SPECT SHAP failed: {e}")
 
         return ModelOutput(
             model_id=self.MODEL_ID,
             modality="neuroimaging",
             dataset="dat-spect",
-            probability=prob_pd,
-            shap_features=[],
-            raw_logit=float(logits[0, 1].item()),
-            mc_samples=[prob_pd],
-            metadata={
-                "predicted_label": predicted_label,
-                "validation_auc": self.VALIDATION_AUC,
-                "device": str(self.device),
-                "input_shape": list(image_array.shape),
-            },
-        )
-
-    def _resolve_input(self, input_data) -> np.ndarray:
-        if isinstance(input_data, dict):
-            for key in ("image", "path", "file_path"):
-                if key in input_data:
-                    return self._resolve_input(input_data[key])
-
-        if isinstance(input_data, (str, Path)):
-            path = Path(input_data)
-            if not path.exists():
-                raise FileNotFoundError(f"SPECT image not found: {path}")
-            img = Image.open(path).convert("L")
-            return np.array(img, dtype=np.float32)
-
-        if isinstance(input_data, np.ndarray):
-            return input_data.astype(np.float32)
-
-        array = np.asarray(input_data, dtype=np.float32)
-        if array.ndim in (2, 3):
-            return array
-
-        raise ValueError(
-            f"SPECT input must be array, path, or dict, got {type(input_data)}"
+            probability=prob,
+            shap_features=shap_features,
+            raw_logit=raw_logit,
+            mc_samples=[],
+            metadata={"validation_auc": metadata.get("validation_auc", 0.0)},
         )
 
 
-def build_spect_model() -> SPECTResNet18Model:
-    return SPECTResNet18Model()
+@lru_cache(maxsize=1)
+def load_spect_components() -> dict:
+    """Download and load all SPECT model artifacts. PyTorch imported here."""
+    torch = _get_torch()
+    resnet18 = _get_resnet18()
+
+    components: dict = {}
+
+    # Try combined pkl artifact first
+    try:
+        artifact_path = model_storage_service.download_model(
+            "neuroimaging/dat-spect/spect_model_artifact.pkl"
+        )
+        with open(artifact_path, "rb") as f:
+            artifact = pickle.load(f)
+        if hasattr(artifact, "state_dict") or isinstance(artifact, torch.nn.Module):
+            components["model"] = artifact
+        elif isinstance(artifact, dict) and "model" in artifact:
+            components.update(artifact)
+        try:
+            meta_path = model_storage_service.download_model(
+                "neuroimaging/dat-spect/metadata.json"
+            )
+            with open(meta_path) as f:
+                components["metadata"] = json.load(f)
+        except Exception:
+            components.setdefault("metadata", {})
+        logger.info("SPECT model loaded from spect_model_artifact.pkl")
+    except Exception as e:
+        logger.warning(f"spect_model_artifact.pkl failed ({e}), trying model.pt ...")
+        model_path = model_storage_service.download_model(
+            "neuroimaging/dat-spect/model.pt"
+        )
+        net = resnet18(weights=None)
+        net.fc = torch.nn.Linear(net.fc.in_features, 2)
+        net.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+        net.eval()
+        components["model"] = net
+
+    # Calibrator (optional)
+    try:
+        cal_path = model_storage_service.download_model(
+            "neuroimaging/dat-spect/calibrator.pkl"
+        )
+        import joblib
+        components["calibrator"] = joblib.load(cal_path)
+    except Exception:
+        components["calibrator"] = None
+
+    # Metadata (optional)
+    if "metadata" not in components:
+        try:
+            meta_path = model_storage_service.download_model(
+                "neuroimaging/dat-spect/metadata.json"
+            )
+            with open(meta_path) as f:
+                components["metadata"] = json.load(f)
+        except Exception:
+            components["metadata"] = {}
+
+    # SHAP reference batch (optional)
+    try:
+        shap_path = model_storage_service.download_model(
+            "neuroimaging/dat-spect/shap_reference_batch.pt"
+        )
+        components["shap_reference_batch"] = torch.load(
+            shap_path, map_location="cpu", weights_only=True
+        )
+    except Exception:
+        components["shap_reference_batch"] = None
+
+    return components
 
 
 @lru_cache(maxsize=1)
 def get_spect_model() -> SPECTResNet18Model:
-    return build_spect_model()
-
-
-__all__ = ["SPECTResNet18Model", "build_spect_model", "get_spect_model"]
+    return SPECTResNet18Model()

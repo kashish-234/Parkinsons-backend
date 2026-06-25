@@ -47,10 +47,10 @@ tensorflow-cpu==2.15.0
 pillow==10.1.0
 
 # ── Report Generation ─────────────────────────────────────────────────────────
-google-generativeai==0.5.4
+google-generativeai==0.4.0
 
 # ── Serialisation ─────────────────────────────────────────────────────────────
-protobuf>=3.20,<5
+protobuf>=3.20.0,<4.0.0
 typing-extensions>=4.8
 
 # ── Logging ───────────────────────────────────────────────────────────────────

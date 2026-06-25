@@ -1,14 +1,17 @@
 import numpy as np
 import shap
+import joblib
 from models.base.contracts import ModelOutput, SHAPFeature
 from .model import load_components
 from .canonicalize import canonicalize
  
- 
 class SpeechItalianLGBM:
  
     MODEL_ID = "speech_italian_lgbm"
-    VALIDATION_AUC = 0.9167
+
+    def __init__(self):
+        c = load_components()
+        self.VALIDATION_AUC = float(c.get("validation_auc", 0.9167))
  
     def predict(self, raw_features: dict) -> ModelOutput:
         c = load_components()

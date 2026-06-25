@@ -1,5 +1,15 @@
 """
 main.py — FastAPI application entry point.
+
+Memory strategy for Render free tier (512 MB RAM):
+- PyTorch (gait, tapping, neuroimaging) + TensorFlow (handwriting) together
+  exceed the free-tier RAM budget if imported at startup.
+- The lifespan block therefore only warms the lightweight, pure-sklearn/joblib
+  models (speech, REM, finger-tapping).  The heavy deep-learning models
+  (gait, neuroimaging, handwriting) are lazy-loaded on first request; the
+  lru_cache in each model module guarantees they are still singletons.
+- On a paid Render tier (≥1 GB RAM) you can restore the full warm-up by
+  uncommenting the three blocks below.
 """
 
 from fastapi import FastAPI, Request
@@ -25,7 +35,9 @@ async def lifespan(app: FastAPI):
     logger.info("PD Detection Backend - Startup")
     logger.info("=" * 60)
 
-    # Warm speech fuser
+    # ── Lightweight models: warm at startup ───────────────────────────────────
+    # These are pure sklearn/joblib — no PyTorch or TensorFlow import cost.
+
     logger.info("Startup: warming speech ensemble...")
     try:
         from models.speech.intra_model import get_speech_fuser
@@ -34,34 +46,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"✗ Speech ensemble warm-up failed: {e}.")
 
-    # Warm imaging fuser
-    logger.info("Startup: warming imaging ensemble...")
-    try:
-        from models.imaging.intra_model import get_imaging_fuser
-        get_imaging_fuser()
-        logger.info("✓ Imaging ensemble ready.")
-    except Exception as e:
-        logger.warning(f"Imaging ensemble not available: {e}.")
-
-    # Warm handwriting model
-    logger.info("Startup: warming handwriting model...")
-    try:
-        from models.handwriting.model import get_handwriting_model
-        model = get_handwriting_model()
-        logger.info(f"✓ Handwriting model ready: {model.MODEL_ID}")
-    except Exception as e:
-        logger.warning(f"Handwriting model not available: {e}.")
-
-    # Warm gait model
-    logger.info("Startup: warming gait model...")
-    try:
-        from services.inference_pipeline import get_gait_model
-        get_gait_model()
-        logger.info("✓ Gait model ready.")
-    except Exception as e:
-        logger.warning(f"Gait model not available: {e}.")
-
-    # Warm tapping model
     logger.info("Startup: warming finger-tapping model...")
     try:
         from services.inference_pipeline import get_tapping_model
@@ -70,7 +54,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Finger-tapping model not available: {e}.")
 
-    # Warm REM pipeline
     logger.info("Startup: warming REM pipeline...")
     try:
         from services.inference_pipeline import get_rem_pipeline
@@ -79,8 +62,40 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"REM pipeline not available: {e}.")
 
+    # ── Heavy models: lazy-load on first request (free tier) ─────────────────
+    # Importing PyTorch + TensorFlow together at startup exceeds the 512 MB
+    # free-tier RAM limit.  Each model module uses lru_cache, so the first
+    # real request loads it once and every subsequent request reuses it.
+    #
+    # To restore eager warm-up on a paid tier (≥ 1 GB), uncomment below:
+    #
+    # logger.info("Startup: warming imaging ensemble...")
+    # try:
+    #     from models.imaging.intra_model import get_imaging_fuser
+    #     get_imaging_fuser()
+    #     logger.info("✓ Imaging ensemble ready.")
+    # except Exception as e:
+    #     logger.warning(f"Imaging ensemble not available: {e}.")
+    #
+    # logger.info("Startup: warming handwriting model...")
+    # try:
+    #     from models.handwriting.model import get_handwriting_model
+    #     model = get_handwriting_model()
+    #     logger.info(f"✓ Handwriting model ready: {model.MODEL_ID}")
+    # except Exception as e:
+    #     logger.warning(f"Handwriting model not available: {e}.")
+    #
+    # logger.info("Startup: warming gait model...")
+    # try:
+    #     from services.inference_pipeline import get_gait_model
+    #     get_gait_model()
+    #     logger.info("✓ Gait model ready.")
+    # except Exception as e:
+    #     logger.warning(f"Gait model not available: {e}.")
+
     logger.info("=" * 60)
     logger.info("Backend Ready - Accepting Requests")
+    logger.info("(gait / imaging / handwriting load on first use)")
     logger.info("=" * 60)
 
     yield
