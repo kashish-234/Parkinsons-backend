@@ -1,36 +1,18 @@
-"""
-imaging/mri/inference.py
-========================
-
-MRI inference wrapper that loads model and provides predict functions.
-"""
-
+"""imaging/mri/inference.py"""
 from __future__ import annotations
-
 from functools import lru_cache
 import logging
 
-from models.imaging.mri.model import build_mri_model, get_mri_model
+from models.imaging.mri.model import get_mri_model
 from models.base.contracts import ModalityResult
 
 logger = logging.getLogger(__name__)
 
 
 def predict_mri(input_data) -> ModalityResult:
-    """
-    Run single MRI scan through model and return ModalityResult.
-
-    Args:
-        input_data: MRI image (array, path, or dict)
-
-    Returns:
-        ModalityResult with probability and metadata
-    """
     try:
         model = get_mri_model()
         model_output = model.predict(input_data)
-
-        # Wrap ModelOutput in ModalityResult
         return ModalityResult(
             modality="neuroimaging",
             available=True,
@@ -58,18 +40,8 @@ def predict_mri(input_data) -> ModalityResult:
 
 
 def predict_mri_batch(samples) -> ModalityResult:
-    """
-    Run multiple MRI images through model and aggregate results.
-
-    Args:
-        samples: List of MRI images
-
-    Returns:
-        Aggregated ModalityResult
-    """
-    import numpy as np
-    from models.speech.intra_model import aggregate_modality_samples
-
+    # FIX H2: use imaging's own aggregate function, not speech's
+    from models.imaging.intra_model import aggregate_modality_samples
     results = [predict_mri(sample) for sample in samples]
     return aggregate_modality_samples(results)
 

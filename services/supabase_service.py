@@ -12,10 +12,7 @@ _client = None
 def get_client():
     global _client
     if _client is None:
-        _client = create_client(
-            settings.supabase_url,
-            settings.supabase_service_key,
-        )
+        _client = create_client(settings.supabase_url, settings.supabase_service_key)
     return _client
 
 
@@ -26,7 +23,6 @@ def get_client():
 def persist_fused_result(result: FusedResult, user_id: str):
     db = get_client()
     try:
-        # fused_results — all columns exist in schema
         db.table("fused_results").insert({
             "job_id":               result.job_id,
             "user_id":              user_id,
@@ -54,7 +50,6 @@ def persist_fused_result(result: FusedResult, user_id: str):
                 "available":     mr.available,
             }).execute()
 
-            # SHAP embedding vector for RAG (pad / truncate to 10 dims)
             vec = [f.value for f in mr.shap_features[:10]]
             vec += [0.0] * (10 - len(vec))
             db.table("shap_embeddings").insert({
@@ -73,10 +68,12 @@ def persist_fused_result(result: FusedResult, user_id: str):
 
 # ---------------------------------------------------------------------------
 # FETCH RESULT
+# FIX H4: Also fetch modality_results rows and attach them.
 # ---------------------------------------------------------------------------
 
 def get_result(job_id: str, user_id: str):
     db = get_client()
+
     res = (
         db.table("fused_results")
         .select("*")
@@ -84,7 +81,21 @@ def get_result(job_id: str, user_id: str):
         .eq("user_id", user_id)
         .execute()
     )
-    return res.data[0] if res.data else None
+    if not res.data:
+        return None
+
+    row = res.data[0]
+
+    # Attach modality_results from the separate table
+    mr_res = (
+        db.table("modality_results")
+        .select("*")
+        .eq("job_id", job_id)
+        .execute()
+    )
+    row["modality_results"] = mr_res.data if mr_res.data else []
+
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +108,7 @@ def get_report(job_id: str):
         db.table("clinical_reports")
         .select("*")
         .eq("job_id", job_id)
-        .order("created_at", desc=True)
+        .order("generated_at", desc=True)
         .limit(1)
         .execute()
     )
@@ -108,11 +119,7 @@ def get_report(job_id: str):
 # FETCH SHAP EMBEDDINGS FOR RAG
 # ---------------------------------------------------------------------------
 
-def get_modality_embeddings_for_job(job_id: str) -> dict[str, list[float]]:
-    """
-    Returns {modality: embedding_vector} for all modalities stored for a job.
-    Used by the RAG service to retrieve similar historical cases.
-    """
+def get_modality_embeddings_for_job(job_id: str) -> dict:
     db = get_client()
     res = (
         db.table("shap_embeddings")

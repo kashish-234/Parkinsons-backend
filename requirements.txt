@@ -58,3 +58,9 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 black==23.12.0
 flake8==6.1.0
+
+# Pydantic v2 type support
+typing-extensions>=4.8
+
+# TensorFlow 2.15 requires protobuf < 5
+protobuf>=3.20,<5

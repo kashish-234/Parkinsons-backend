@@ -21,7 +21,7 @@ class SpeechUCIRF:
         validation_auc = (components["validation_auc"])
         decision_threshold = (components["decision_threshold"])
 
-        row = np.array([[raw_features[col] for col in feature_cols_full]], dtype=np.float64)
+        row = np.array([[raw_features.get(col, 0.0) for col in feature_cols_full]], dtype=np.float64)
 
         row_sel = selector.transform(row)
         prob = float(cal_model.predict_proba(row_sel)[0, 1])

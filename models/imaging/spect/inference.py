@@ -1,36 +1,17 @@
-"""
-imaging/spect/inference.py
-==========================
-
-SPECT inference wrapper that loads model and provides predict functions.
-"""
-
+"""imaging/spect/inference.py"""
 from __future__ import annotations
-
-from functools import lru_cache
 import logging
 
-from models.imaging.spect.model import build_spect_model, get_spect_model
+from models.imaging.spect.model import get_spect_model
 from models.base.contracts import ModalityResult
 
 logger = logging.getLogger(__name__)
 
 
 def predict_spect(input_data) -> ModalityResult:
-    """
-    Run single SPECT scan through model and return ModalityResult.
-
-    Args:
-        input_data: SPECT image (array, path, or dict)
-
-    Returns:
-        ModalityResult with probability and metadata
-    """
     try:
         model = get_spect_model()
         model_output = model.predict(input_data)
-
-        # Wrap ModelOutput in ModalityResult
         return ModalityResult(
             modality="neuroimaging",
             available=True,
@@ -58,18 +39,8 @@ def predict_spect(input_data) -> ModalityResult:
 
 
 def predict_spect_batch(samples) -> ModalityResult:
-    """
-    Run multiple SPECT images through model and aggregate results.
-
-    Args:
-        samples: List of SPECT images
-
-    Returns:
-        Aggregated ModalityResult
-    """
-    import numpy as np
-    from models.speech.intra_model import aggregate_modality_samples
-
+    # FIX H3: use imaging's own aggregate function
+    from models.imaging.intra_model import aggregate_modality_samples
     results = [predict_spect(sample) for sample in samples]
     return aggregate_modality_samples(results)
 

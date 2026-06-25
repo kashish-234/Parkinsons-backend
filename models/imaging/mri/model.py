@@ -56,15 +56,15 @@ class MRIResNet18Model:
         )
 
     def _load_model(self) -> torch.nn.Module:
-        """Load ResNet18 from artifact."""
+        """Load ResNet18 from artifact and calibrator."""
         try:
+            # FIX C6: correct HF path
             artifact_path = model_storage_service.download_model(
-                "mri/mri_resnet18.pt"
+                "neuroimaging/mri/model.pt"
             )
             logger.info(f"Loading MRI model from: {artifact_path}")
 
             model = resnet18(pretrained=False, num_classes=2)
-            # Adapt first layer to accept single-channel input
             model.conv1 = torch.nn.Conv2d(
                 1, 64, kernel_size=7, stride=2, padding=3, bias=False
             )
@@ -77,6 +77,18 @@ class MRIResNet18Model:
 
             model = model.to(self.device)
             model.eval()
+
+            # FIX H8: Load calibrator (Platt/temperature scaling saved during training)
+            try:
+                import joblib
+                cal_path = model_storage_service.download_model(
+                    "neuroimaging/mri/calibrator.pkl"
+                )
+                self._calibrator = joblib.load(cal_path)
+                logger.info("MRI calibrator loaded.")
+            except Exception as e:
+                logger.warning(f"MRI calibrator not loaded (raw probs used): {e}")
+                self._calibrator = None
 
             logger.info("MRI model loaded successfully")
             return model
@@ -118,11 +130,24 @@ class MRIResNet18Model:
 
         # Forward pass
         with torch.no_grad():
-            logits = self.model(tensor_input)  # (1, 2)
+            logits = self.model(tensor_input)
             probs = torch.softmax(logits, dim=1)
 
-        prob_pd = float(probs[0, 1].item())
-        predicted_label = int(prob_pd >= 0.5)
+        prob_pd_raw = float(probs[0, 1].item())
+
+        # Apply calibrator if loaded
+        if self._calibrator is not None:
+            try:
+                import numpy as np
+                prob_pd = float(
+                    self._calibrator.predict_proba(
+                        np.array([[prob_pd_raw]])
+                    )[0, 1]
+                )
+            except Exception:
+                prob_pd = prob_pd_raw
+        else:
+            prob_pd = prob_pd_raw
 
         return ModelOutput(
             model_id=self.MODEL_ID,

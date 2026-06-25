@@ -111,9 +111,9 @@ class DenseNet201BinaryModel:
     def _load_model(self) -> tuple[Model, dict[str, Any]]:
         """Load model from artifact or download from HuggingFace."""
         try:
-            # Try to download from HuggingFace
+            # FIX C9: HF repo stores at "Handwriting/model.keras" (capital H).
             artifact_path = model_storage_service.download_model(
-                "handwriting/handwriting_model.keras"
+                "Handwriting/model.keras"
             )
         except Exception:
             # Fallback to local candidates
@@ -134,7 +134,6 @@ class DenseNet201BinaryModel:
 
         if "class_names" not in model_meta:
             model_meta["class_names"] = self.spec.class_names
-
         if "artifact_path" not in model_meta:
             model_meta["artifact_path"] = str(artifact_path)
 

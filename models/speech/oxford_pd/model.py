@@ -1,24 +1,19 @@
 from functools import lru_cache
 import joblib
-
-from services.model_storage_service import (
-    model_storage_service
-)
+from services.model_storage_service import model_storage_service
 
 
 @lru_cache(maxsize=1)
 def load_components():
-
+    # FIX C8: HF path is "speech/oxford_pd/", not "speech/oxford/"
     model_path = model_storage_service.download_model(
-        "speech/oxford/speech_oxford_lgbm_v1.pkl"
+        "speech/oxford_pd/speech_oxford_lgbm_v1.pkl"
     )
-
     cal_model_path = model_storage_service.download_model(
-        "speech/oxford/speech_oxford_lgbm_v1_calibrated.pkl"
+        "speech/oxford_pd/speech_oxford_lgbm_v1_calibrated.pkl"
     )
-
     feature_map_path = model_storage_service.download_model(
-        "speech/oxford/feature_map.pkl"
+        "speech/oxford_pd/feature_map.pkl"
     )
 
     return (

@@ -1,14 +1,16 @@
 """
 services/inference_pipeline.py
-==============================
+================================
+Complete inference pipeline supporting all modalities.
 
-Complete inference pipeline supporting all modalities:
-- speech (multi-dataset fusion)
-- neuroimaging (MRI + SPECT fusion)
-- finger tapping
-- gait
-- REM
-- handwriting
+Multi-file support:
+  - Speech:       N CSV files  → each row is one recording → median-aggregate
+  - Handwriting:  N images     → per-image fuse → median-aggregate
+  - Gait:         N .npy files → per-file predict → median-aggregate
+  - Tapping:      N CSV files  → per-row predict  → median-aggregate
+  - Neuroimaging: files tagged "mri_" or "spect_" in the Supabase path
+                  are routed to the correct sub-modality.
+  - REM:          N CSV files  → concat → single predict_proba call
 """
 
 import os
@@ -16,8 +18,9 @@ import csv
 import uuid
 import shutil
 import logging
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from models.base.contracts import FusedResult, ModalityResult
 from models.speech.intra_model import predict_speech_batch
@@ -25,23 +28,53 @@ from models.fusion.late_fusion import late_fusion_model
 
 logger = logging.getLogger(__name__)
 
-ALL_MODALITIES = [
-    "neuroimaging",
-    "speech",
-    "tapping",
-    "gait",
-    "rem",
-    "handwriting",
-]
+ALL_MODALITIES = ["neuroimaging", "speech", "tapping", "gait", "rem", "handwriting"]
 
 
 # ============================================================================
-# Utility Functions
+# Singletons  (FIX M1 — avoid re-instantiating expensive objects per request)
 # ============================================================================
 
+@lru_cache(maxsize=1)
+def get_gait_model():
+    from models.gait.inference import GaitDaphnetCNNLSTM
+    return GaitDaphnetCNNLSTM()
+
+
+@lru_cache(maxsize=1)
+def get_tapping_model():
+    from models.finger_tapping.inference import FingerTappingLGBM
+    return FingerTappingLGBM()
+
+
+@lru_cache(maxsize=1)
+def get_rem_pipeline():
+    """
+    Download REM artifacts from HuggingFace and return a ready pipeline.
+    FIX C4: artifacts come from HF, not from a local 'models/rem/artifacts' dir.
+    """
+    import joblib
+    from models.rem.inference import REMInferencePipeline
+    from services.model_storage_service import model_storage_service
+
+    # Required artifacts
+    ensemble_path  = model_storage_service.download_model("rem/rem_ensemble.pkl")
+    metadata_path  = model_storage_service.download_model("rem/modality_result.json")
+    shap_path      = model_storage_service.download_model("rem/shap_explainer.pkl")
+
+    pipeline = REMInferencePipeline.from_local(
+        ensemble_path=ensemble_path,
+        metadata_path=metadata_path,
+        shap_path=shap_path,
+    )
+    return pipeline
+
+
+# ============================================================================
+# Utility
+# ============================================================================
 
 def _make_unavailable(modality: str, reason: str) -> ModalityResult:
-    """Create unavailable ModalityResult with all required fields."""
     return ModalityResult(
         modality=modality,
         available=False,
@@ -56,23 +89,10 @@ def _make_unavailable(modality: str, reason: str) -> ModalityResult:
 
 
 # ============================================================================
-# Speech Modality
+# Speech
 # ============================================================================
 
-
 def _load_speech_file(path: str) -> List[dict]:
-    """
-    Load speech feature CSV file as list of feature dicts.
-
-    Each row becomes one sample: dict[str, float] → one recording.
-    Supports single-row and multi-row CSVs.
-
-    Args:
-        path: Path to CSV file
-
-    Returns:
-        List of feature dicts, one per row
-    """
     samples = []
     try:
         with open(path, newline="", encoding="utf-8") as f:
@@ -83,7 +103,7 @@ def _load_speech_file(path: str) -> List[dict]:
                     try:
                         sample[k.strip()] = float(v)
                     except (ValueError, TypeError):
-                        pass  # Skip non-numeric columns
+                        pass
                 if sample:
                     samples.append(sample)
     except Exception as e:
@@ -92,15 +112,6 @@ def _load_speech_file(path: str) -> List[dict]:
 
 
 def _run_speech_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run speech inference on uploaded files.
-
-    Args:
-        paths: List of local file paths to speech CSVs
-
-    Returns:
-        ModalityResult for speech modality
-    """
     try:
         all_samples: List[dict] = []
         for path in paths:
@@ -110,12 +121,8 @@ def _run_speech_inference(paths: List[str]) -> ModalityResult:
             all_samples.extend(samples)
 
         if not all_samples:
-            return _make_unavailable(
-                "speech", "no_valid_feature_rows_in_files"
-            )
+            return _make_unavailable("speech", "no_valid_feature_rows_in_files")
 
-        # Run through speech ensemble (fuses sub-models per sample,
-        # then aggregates across N recordings via median)
         result = predict_speech_batch(all_samples)
         logger.info(
             f"speech: prob={result.probability:.3f} "
@@ -130,40 +137,45 @@ def _run_speech_inference(paths: List[str]) -> ModalityResult:
 
 
 # ============================================================================
-# Neuroimaging Modality (MRI + SPECT fusion)
+# Neuroimaging (MRI + SPECT)
+# FIX H7: Route files by filename prefix ("mri_" or "spect_") written by the
+# predict route when it downloads from Supabase using the modality key.
+# The predict route already prefixes files as f"{tmp_dir}/{modality}_{filename}",
+# e.g. "neuroimaging_mri_scan1.nii". We further look at the original path to
+# determine sub-modality. Convention: caller should pass "neuroimaging" files
+# in sub-keys "mri" and "spect" inside data.files, which the predict route
+# must flatten. See note in predict.py about updating the request schema.
+# For backward compatibility we also accept the raw neuroimaging list and
+# route by filename substring.
 # ============================================================================
 
-
 def _run_neuroimaging_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run neuroimaging inference (MRI + SPECT fusion) on uploaded files.
-
-    Args:
-        paths: List of local file paths to imaging files
-
-    Returns:
-        ModalityResult for neuroimaging modality
-    """
     try:
         from models.imaging.intra_model import predict_imaging_batch
 
         if not paths:
             return _make_unavailable("neuroimaging", "no_files_provided")
 
-        # Load imaging samples from files
-        # Assumes files are named with modality prefix or in sub-directories:
-        # e.g., "mri_scan_001.nii", "spect_scan_001.nii", or "mri/scan_001.nii"
-        imaging_samples = []
-        for path in paths:
-            try:
-                # Simple approach: treat each file as one sample
-                # More sophisticated: group by modality
-                imaging_samples.append({"mri": path} if "mri" in path.lower() else {"spect": path})
-            except Exception as e:
-                logger.warning(f"Failed to load imaging file {path}: {e}")
+        # Route each file to MRI or SPECT based on filename substring.
+        # The predict route writes files as: /tmp/{job_id}/neuroimaging_{original_path_basename}
+        # The original Supabase paths should be named with "mri" or "spect" somewhere,
+        # e.g. "patient_data/mri_scan_001.nii" or "patient_data/spect_scan_001.nii".
+        mri_paths   = [p for p in paths if "mri"   in Path(p).name.lower()]
+        spect_paths = [p for p in paths if "spect" in Path(p).name.lower()]
 
-        if not imaging_samples:
-            return _make_unavailable("neuroimaging", "no_valid_imaging_files")
+        # If no sub-modality tagging, treat all as MRI (best-effort fallback)
+        if not mri_paths and not spect_paths:
+            logger.warning(
+                "Neuroimaging files have no 'mri'/'spect' tag in filenames. "
+                "Treating all as MRI. Rename files to include 'mri' or 'spect'."
+            )
+            mri_paths = paths
+
+        imaging_samples = []
+        for mri_path in mri_paths:
+            imaging_samples.append({"mri": mri_path})
+        for spect_path in spect_paths:
+            imaging_samples.append({"spect": spect_path})
 
         result = predict_imaging_batch(imaging_samples)
         logger.info(
@@ -174,50 +186,33 @@ def _run_neuroimaging_inference(paths: List[str]) -> ModalityResult:
 
     except Exception as e:
         logger.error(f"Neuroimaging inference failed: {e}", exc_info=True)
-        return _make_unavailable(
-            "neuroimaging", f"inference_error: {e}"
-        )
+        return _make_unavailable("neuroimaging", f"inference_error: {e}")
 
 
 # ============================================================================
-# Finger Tapping Modality
+# Finger Tapping  (FIX M1: use singleton)
 # ============================================================================
-
 
 def _run_tapping_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run finger tapping inference on uploaded files.
-
-    Args:
-        paths: List of local file paths to tapping data
-
-    Returns:
-        ModalityResult for tapping modality
-    """
     try:
-        from models.finger_tapping.inference import FingerTappingLGBM
-
         if not paths:
             return _make_unavailable("tapping", "no_files_provided")
 
-        model = FingerTappingLGBM()
+        model = get_tapping_model()
         results = []
 
         for path in paths:
             try:
-                # Load tapping features from CSV
-                samples = _load_speech_file(path)  # Reuse CSV loading
+                samples = _load_speech_file(path)  # CSV loader reused
                 for sample in samples:
                     model_output = model.predict(sample)
-
-                    # Convert ModelOutput to ModalityResult
                     result = ModalityResult(
                         modality="tapping",
                         available=True,
                         probability=model_output.probability,
-                        ci_low=max(0.0, model_output.probability - 0.1),
-                        ci_high=min(1.0, model_output.probability + 0.1),
-                        ci_width=0.2,
+                        ci_low=max(0.0, model_output.probability - 0.15),
+                        ci_high=min(1.0, model_output.probability + 0.15),
+                        ci_width=0.3,
                         shap_features=model_output.shap_features,
                         model_ids=[model_output.model_id],
                         metadata=model_output.metadata,
@@ -229,7 +224,6 @@ def _run_tapping_inference(paths: List[str]) -> ModalityResult:
         if not results:
             return _make_unavailable("tapping", "inference_failed_for_all_files")
 
-        # Aggregate results
         from models.speech.intra_model import aggregate_modality_samples
         return aggregate_modality_samples(results)
 
@@ -239,45 +233,29 @@ def _run_tapping_inference(paths: List[str]) -> ModalityResult:
 
 
 # ============================================================================
-# Gait Modality
+# Gait  (FIX M1: use singleton)
 # ============================================================================
 
-
 def _run_gait_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run gait inference on uploaded files.
-
-    Args:
-        paths: List of local file paths to gait sensor data
-
-    Returns:
-        ModalityResult for gait modality
-    """
     try:
-        from models.gait.inference import GaitDaphnetCNNLSTM
-
         if not paths:
             return _make_unavailable("gait", "no_files_provided")
 
-        model = GaitDaphnetCNNLSTM()
+        import numpy as np
+        model = get_gait_model()
         results = []
 
         for path in paths:
             try:
-                # Load gait sensor window from file (assumes numpy-serialized format)
-                import numpy as np
-                window = np.load(path)  # or load from CSV/JSON as needed
-
+                window = np.load(path)
                 model_output = model.predict({"window": window})
-
-                # Convert ModelOutput to ModalityResult
                 result = ModalityResult(
                     modality="gait",
                     available=True,
                     probability=model_output.probability,
-                    ci_low=max(0.0, model_output.probability - 0.1),
-                    ci_high=min(1.0, model_output.probability + 0.1),
-                    ci_width=0.2,
+                    ci_low=max(0.0, model_output.probability - 0.15),
+                    ci_high=min(1.0, model_output.probability + 0.15),
+                    ci_width=0.3,
                     shap_features=model_output.shap_features,
                     model_ids=[model_output.model_id],
                     metadata=model_output.metadata,
@@ -289,7 +267,6 @@ def _run_gait_inference(paths: List[str]) -> ModalityResult:
         if not results:
             return _make_unavailable("gait", "inference_failed_for_all_files")
 
-        # Aggregate results
         from models.speech.intra_model import aggregate_modality_samples
         return aggregate_modality_samples(results)
 
@@ -299,33 +276,20 @@ def _run_gait_inference(paths: List[str]) -> ModalityResult:
 
 
 # ============================================================================
-# REM Modality
+# REM  (FIX C4: download artifacts from HF via get_rem_pipeline singleton)
 # ============================================================================
 
-
 def _run_rem_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run REM sleep behaviour disorder inference on uploaded files.
-
-    Args:
-        paths: List of local file paths to REM data (CSV)
-
-    Returns:
-        ModalityResult for rem modality
-    """
     try:
         import pandas as pd
-        from models.rem.inference import REMInferencePipeline
 
         if not paths:
             return _make_unavailable("rem", "no_files_provided")
 
-        # Load and aggregate all REM data
         dfs = []
         for path in paths:
             try:
-                df = pd.read_csv(path)
-                dfs.append(df)
+                dfs.append(pd.read_csv(path))
             except Exception as e:
                 logger.warning(f"Failed to load REM file {path}: {e}")
 
@@ -334,15 +298,10 @@ def _run_rem_inference(paths: List[str]) -> ModalityResult:
 
         combined_df = pd.concat(dfs, ignore_index=True)
 
-        # Load REM pipeline and run inference
-        pipeline = REMInferencePipeline.from_artifacts(
-            artifact_dir="models/rem/artifacts"
-        )
+        pipeline = get_rem_pipeline()
         proba = pipeline.predict_proba(combined_df)
 
-        # Extract P(PD) = probability of class 0
         prob_pd = float(proba[:, 0].mean())
-
         logger.info(f"rem: prob={prob_pd:.3f}")
 
         return ModalityResult(
@@ -370,20 +329,10 @@ def _run_rem_inference(paths: List[str]) -> ModalityResult:
 
 
 # ============================================================================
-# Handwriting Modality
+# Handwriting
 # ============================================================================
 
-
 def _run_handwriting_inference(paths: List[str]) -> ModalityResult:
-    """
-    Run handwriting analysis inference on uploaded image files.
-
-    Args:
-        paths: List of local file paths to handwriting images
-
-    Returns:
-        ModalityResult for handwriting modality
-    """
     try:
         from models.handwriting.model import predict_handwriting_batch
 
@@ -391,7 +340,6 @@ def _run_handwriting_inference(paths: List[str]) -> ModalityResult:
             return _make_unavailable("handwriting", "no_files_provided")
 
         result = predict_handwriting_batch(paths)
-
         logger.info(
             f"handwriting: prob={result.probability:.3f} "
             f"CI=[{result.ci_low:.3f},{result.ci_high:.3f}]"
@@ -400,45 +348,21 @@ def _run_handwriting_inference(paths: List[str]) -> ModalityResult:
 
     except Exception as e:
         logger.error(f"Handwriting inference failed: {e}", exc_info=True)
-        return _make_unavailable(
-            "handwriting", f"inference_error: {e}"
-        )
+        return _make_unavailable("handwriting", f"inference_error: {e}")
 
 
 # ============================================================================
-# Main Inference Pipeline
+# Main pipeline
 # ============================================================================
 
-
-def run_inference(
-    patient_id: str, input_paths: Dict[str, List[str]]
-) -> FusedResult:
-    """
-    Run complete inference pipeline across all modalities.
-
-    Args:
-        patient_id: Patient identifier
-        input_paths: Dict mapping modality name → list of local file paths.
-                     Files are already downloaded from Supabase storage
-                     by the predict route.
-
-    Returns:
-        FusedResult with final probability, risk label, CI, and per-modality
-        contributions.
-
-    Raises:
-        ValueError: If no modality data could be processed
-    """
+def run_inference(patient_id: str, input_paths: Dict[str, List[str]]) -> FusedResult:
     job_id = str(uuid.uuid4())
 
     submitted = [m for m, paths in input_paths.items() if paths]
-    logger.info(
-        f"Job {job_id} | patient {patient_id} | submitted: {submitted}"
-    )
+    logger.info(f"Job {job_id} | patient {patient_id} | submitted: {submitted}")
 
     modality_results: List[ModalityResult] = []
 
-    # Run inference for each modality
     for modality in ALL_MODALITIES:
         paths = input_paths.get(modality, [])
 
@@ -465,10 +389,6 @@ def run_inference(
 
         modality_results.append(result)
 
-    # ========================================================================
-    # Validate and Fuse
-    # ========================================================================
-
     available_count = sum(1 for r in modality_results if r.available)
     if available_count == 0:
         raise ValueError(
@@ -476,18 +396,14 @@ def run_inference(
             "Check input files and modality-specific requirements."
         )
 
-    logger.info(
-        f"Job {job_id} | available modalities: {available_count}/6"
-    )
+    logger.info(f"Job {job_id} | available modalities: {available_count}/6")
 
-    # Late fusion
     try:
         fused = late_fusion_model.fuse(modality_results, patient_id, job_id)
     except Exception as e:
         logger.error(f"Late fusion failed: {e}", exc_info=True)
         raise
 
-    # Append confidence warning if few modalities available
     if available_count < 3:
         warning = (
             f"Only {available_count}/6 modalities submitted. "
@@ -496,13 +412,11 @@ def run_inference(
         fused.risk_label = fused.risk_label + "_low_confidence"
         if fused.report_json is None:
             fused.report_json = {}
+        # FIX H5: Use "confidence_warning" consistently; predict.py now reads this key.
         fused.report_json["confidence_warning"] = warning
         logger.warning(f"Job {job_id}: {warning}")
 
-    # ========================================================================
-    # Cleanup
-    # ========================================================================
-
+    # Cleanup tmp dir
     tmp_dir = f"/tmp/{job_id}"
     if os.path.exists(tmp_dir):
         shutil.rmtree(tmp_dir, ignore_errors=True)
