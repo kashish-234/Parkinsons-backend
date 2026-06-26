@@ -48,12 +48,12 @@ class ModalityResult:
 class FusedResult:
     job_id: str
     patient_id: str
-    patient_uuid: Optional[str] = None
     probability: float
     risk_label: str
     ci_low: float
     ci_high: float
     modality_weights: dict[str, float]
+    modality_results: list[ModalityResult]
+    patient_uuid: Optional[str] = None
     fusion_model_version: str | None = None
     report_json: dict | None = None
-    modality_results: list[ModalityResult]
