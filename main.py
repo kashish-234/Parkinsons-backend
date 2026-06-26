@@ -14,7 +14,7 @@ Memory strategy for Render free tier (512 MB RAM):
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.gzip import GZIPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import logging
@@ -122,7 +122,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(GZIPMiddleware, minimum_size=1000)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(predict.router, prefix="/api", tags=["prediction"])
