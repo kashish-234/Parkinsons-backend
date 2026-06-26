@@ -36,6 +36,7 @@ def retrieve_similar_cases(
             response = db.rpc("match_shap_embeddings", {
                 "query_embedding": embedding,
                 "match_count": k_per_modality,
+                "exclude_job_id": job_id,   # exclude the current job from results
             }).execute()
 
             if not response.data:

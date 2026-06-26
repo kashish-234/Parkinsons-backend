@@ -46,14 +46,16 @@ class ModalityResult:
 
 @dataclass
 class FusedResult:
+    # ── Required fields (no defaults) — must come first ───────────────────────
     job_id: str
     patient_id: str
     probability: float
     risk_label: str
     ci_low: float
     ci_high: float
-    modality_weights: dict[str, float]
-    modality_results: list[ModalityResult]
+    modality_weights: dict
+    modality_results: list          # list[ModalityResult]
+    # ── Optional fields (have defaults) ──────────────────────────────────────
     patient_uuid: Optional[str] = None
-    fusion_model_version: str | None = None
-    report_json: dict | None = None
+    fusion_model_version: Optional[str] = None
+    report_json: Optional[dict] = None

@@ -9,8 +9,7 @@ from core.config import settings
 
 _client: Client | None = None
 _client_created_at: float = 0
-# Re-create the client every 30 min to avoid stale connections on Render
-_CLIENT_TTL_SECONDS = 1800
+_CLIENT_TTL_SECONDS = 1800  # re-create every 30 min to avoid stale connections
 
 
 def get_client() -> Client:
@@ -21,61 +20,101 @@ def get_client() -> Client:
     return _client
 
 
-# ── Save results ────────────────────────────────────────────────────────────
+# ── SHAP embedding dimension ───────────────────────────────────────────────────
+# Must match the vector(N) dimension in the DB schema.
+# We store the top-N SHAP values per modality, zero-padded to this length.
+SHAP_VECTOR_DIM = 10
 
-def persist_fused_result(result: FusedResult, user_id: str):
+
+# ── Persist analysis results ──────────────────────────────────────────────────
+
+def persist_fused_result(fused: FusedResult, user_id: str) -> None:
+    """
+    Write the complete analysis job to the DB.
+    Called as a FastAPI background task after the HTTP response is sent.
+
+    Stores:
+      - fused_results      (one row per job)
+      - modality_results   (one row per available modality)
+      - shap_embeddings    (one row per available modality, for RAG retrieval)
+
+    Raw patient files are NEVER stored — they live only in /tmp during inference.
+    """
     db = get_client()
+
+    # ── 1. fused_results ──────────────────────────────────────────────────────
     try:
         db.table("fused_results").insert({
-            "job_id":  result.job_id,
-            "user_id": user_id,
-            "patient_id": result.patient_id,
-            "patient_uuid": getattr(result, "patient_uuid", None),
-            "probability":          result.probability,
-            "risk_label":           result.risk_label,
-            "ci_low":               result.ci_low,
-            "ci_high":              result.ci_high,
-            "modality_weights":     result.modality_weights,
-            "fusion_model_version": result.fusion_model_version,
-            "report_json":          result.report_json,
+            "job_id":               fused.job_id,
+            "user_id":              user_id,
+            "patient_id":           fused.patient_id,
+            "patient_uuid":         getattr(fused, "patient_uuid", None),
+            "probability":          fused.probability,
+            "risk_label":           fused.risk_label,
+            "ci_low":               fused.ci_low,
+            "ci_high":              fused.ci_high,
+            "modality_weights":     fused.modality_weights,
+            "fusion_model_version": fused.fusion_model_version,
+            "report_json":          fused.report_json,
         }).execute()
+        logger.info("fused_results saved: job=%s patient=%s", fused.job_id, fused.patient_id)
+    except Exception as e:
+        logger.exception("Failed to save fused_results for job %s: %s", fused.job_id, e)
+        return  # can't save child rows without the parent
 
-        for mr in result.modality_results:
-            if not mr.available:
-                continue
+    # ── 2. modality_results + shap_embeddings ─────────────────────────────────
+    for mr in fused.modality_results:
+        if not mr.available:
+            continue
 
+        # modality_results
+        try:
             db.table("modality_results").insert({
-                "job_id":        result.job_id,
-                "modality":      mr.modality,
-                "probability":   mr.probability,
+                "job_id":      fused.job_id,
+                "modality":    mr.modality,
+                "probability": mr.probability,
                 "shap_features": [
                     {"name": f.name, "value": f.value, "rank": f.rank}
                     for f in mr.shap_features
                 ],
-                "available":     mr.available,
+                "available":   True,
             }).execute()
+        except Exception as e:
+            logger.exception(
+                "Failed to save modality_results for job %s modality %s: %s",
+                fused.job_id, mr.modality, e
+            )
+            continue  # still try to save SHAP embedding
 
-            # Build a fixed-length float vector for pgvector (dim=10)
-            shap_vals = [float(f.value) for f in mr.shap_features[:10]]
-            shap_vals += [0.0] * (10 - len(shap_vals))  # zero-pad to 10
+        # shap_embeddings — fixed-length float vector for pgvector
+        try:
+            shap_vals = [float(f.value) for f in mr.shap_features[:SHAP_VECTOR_DIM]]
+            shap_vals += [0.0] * (SHAP_VECTOR_DIM - len(shap_vals))  # zero-pad
 
             db.table("shap_embeddings").insert({
-                "job_id":    result.job_id,
+                "job_id":    fused.job_id,
                 "modality":  mr.modality,
-                "content":   f"{mr.modality} SHAP features for job {result.job_id}",
-                "embedding": shap_vals,  # list[float] — pgvector expects this
+                "content":   (
+                    f"{mr.modality} SHAP: "
+                    + ", ".join(
+                        f"{f.name}={f.value:.4f}"
+                        for f in mr.shap_features[:5]
+                    )
+                ),
+                "embedding": shap_vals,
             }).execute()
+        except Exception as e:
+            logger.exception(
+                "Failed to save shap_embeddings for job %s modality %s: %s",
+                fused.job_id, mr.modality, e
+            )
 
-        logger.info("Persisted job %s for patient %s",result.job_id,result.patient_id,)
-
-    except Exception as e:
-        logger.exception(f"Persist failed for job {result.job_id}: {e}")
-        raise
+    logger.info("Persistence complete: job=%s", fused.job_id)
 
 
-# ── Fetch result ─────────────────────────────────────────────────────────────
+# ── Fetch fused result (with modality_results joined) ────────────────────────
 
-def get_result(job_id: str, user_id: str):
+def get_result(job_id: str, user_id: str) -> dict | None:
     db = get_client()
 
     res = (
@@ -96,14 +135,14 @@ def get_result(job_id: str, user_id: str):
         .eq("job_id", job_id)
         .execute()
     )
-    row["modality_results"] = mr_res.data if mr_res.data else []
+    row["modality_results"] = mr_res.data or []
 
     return row
 
 
-# ── Fetch report ──────────────────────────────────────────────────────────────
+# ── Fetch clinical report ──────────────────────────────────────────────────────
 
-def get_report(job_id: str):
+def get_report(job_id: str) -> dict | None:
     db = get_client()
     res = (
         db.table("clinical_reports")
@@ -118,7 +157,7 @@ def get_report(job_id: str):
 
 # ── Fetch SHAP embeddings for RAG ─────────────────────────────────────────────
 
-def get_modality_embeddings_for_job(job_id: str) -> dict:
+def get_modality_embeddings_for_job(job_id: str) -> dict[str, list[float]]:
     db = get_client()
     res = (
         db.table("shap_embeddings")
@@ -128,4 +167,14 @@ def get_modality_embeddings_for_job(job_id: str) -> dict:
     )
     if not res.data:
         return {}
-    return {row["modality"]: row["embedding"] for row in res.data}
+
+    def _parse_vec(raw) -> list:
+        # Supabase returns vector columns as strings '[0.1,0.2,...]' — parse to list
+        if isinstance(raw, list):
+            return [float(x) for x in raw]
+        if isinstance(raw, str):
+            import json as _json
+            return [float(x) for x in _json.loads(raw)]
+        return list(raw)
+
+    return {row["modality"]: _parse_vec(row["embedding"]) for row in res.data}

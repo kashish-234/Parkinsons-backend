@@ -20,13 +20,17 @@ def _get_jwks() -> dict:
 
     if _jwks_cache is None or time.time() - _jwks_last_fetched > _JWKS_TTL:
         try:
-            res = requests.get(JWKS_URL, timeout=10)
+            # Supabase requires the anon key as apikey header on all /auth/v1/* endpoints
+            res = requests.get(
+                JWKS_URL,
+                headers={"apikey": settings.supabase_anon_key},
+                timeout=10,
+            )
             res.raise_for_status()
             _jwks_cache = res.json()
             _jwks_last_fetched = time.time()
         except Exception as e:
             if _jwks_cache is not None:
-                # Return stale cache rather than crashing
                 import logging
                 logging.getLogger(__name__).warning(
                     f"JWKS refresh failed ({e}); using stale cache."

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     # Supabase
     supabase_url: str
     supabase_service_key: str
+    supabase_anon_key: str        # needed for JWKS fetch (/auth/v1/keys requires apikey header)
 
     # Gemini (GenAI)
     gemini_api_key: str
@@ -34,7 +35,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = Path(__file__).resolve().parent.parent / ".env"
         env_file_encoding = "utf-8"
-        # Accept both lower-case and UPPER_CASE env var names
         case_sensitive = False
 
 
