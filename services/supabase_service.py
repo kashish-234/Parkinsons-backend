@@ -27,16 +27,16 @@ def persist_fused_result(result: FusedResult, user_id: str):
     db = get_client()
     try:
         db.table("fused_results").insert({
-            "job_id":               result.job_id,
-            "user_id":              user_id,
-            "patient_id":           result.patient_id,
+            "job_id":  result.job_id,
+            "user_id": user_id,
+            "patient_id": result.patient_id,
+            "patient_uuid": getattr(result, "patient_uuid", None),
             "probability":          result.probability,
             "risk_label":           result.risk_label,
             "ci_low":               result.ci_low,
             "ci_high":              result.ci_high,
             "modality_weights":     result.modality_weights,
             "fusion_model_version": result.fusion_model_version,
-            # FIX: persist report_json (contains confidence_warning etc.)
             "report_json":          result.report_json,
         }).execute()
 
@@ -66,10 +66,10 @@ def persist_fused_result(result: FusedResult, user_id: str):
                 "embedding": shap_vals,  # list[float] — pgvector expects this
             }).execute()
 
-        logger.info(f"Persisted job {result.job_id} for user {user_id}")
+        logger.info("Persisted job %s for patient %s",result.job_id,result.patient_id,)
 
     except Exception as e:
-        logger.error(f"Persist failed for job {result.job_id}: {e}")
+        logger.exception(f"Persist failed for job {result.job_id}: {e}")
         raise
 
 

@@ -46,16 +46,14 @@ class ModalityResult:
 
 @dataclass
 class FusedResult:
-    """
-    Final prediction from LateFusionModel. Saved to DB.
-    """
     job_id: str
     patient_id: str
+    patient_uuid: Optional[str] = None
     probability: float
+    risk_label: str
     ci_low: float
     ci_high: float
-    risk_label: str            # "low" / "borderline" / "high"
-    modality_results: list     # list[ModalityResult]
-    modality_weights: dict     # {"speech": 0.xx, ...}
-    fusion_model_version: str
-    report_json: Optional[dict] = None
+    modality_weights: dict[str, float]
+    fusion_model_version: str | None = None
+    report_json: dict | None = None
+    modality_results: list[ModalityResult]

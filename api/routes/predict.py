@@ -45,7 +45,9 @@ async def predict(
         input_paths[modality] = modality_files
 
     try:
-        fused = run_inference(data.patient_id, input_paths)
+        fused = run_inference(patient_id=data.patient_id,input_paths=input_paths,)
+        if data.patient_uuid:
+            fused.patient_uuid = data.patient_uuid
     except ValueError as e:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=str(e))
@@ -56,7 +58,7 @@ async def predict(
         # Always clean up staging dir
         shutil.rmtree(staging_dir, ignore_errors=True)
 
-    background_tasks.add_task(persist_fused_result, fused, user_id)
+    background_tasks.add_task(persist_fused_result,fused=fused,user_id=user_id,)
 
     warning = None
     if fused.report_json:
