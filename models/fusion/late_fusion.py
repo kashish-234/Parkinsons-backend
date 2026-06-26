@@ -232,19 +232,11 @@ class LateFusionModel:
     def _classify_risk(self, probability: float) -> str:
         """
         Classify risk level based on probability.
-        
-        Args:
-            probability: P(PD) from fused model
-        
+
         Returns:
-            Risk label: "low", "borderline", or "high"
+            Risk label: "Positive" (P(PD) >= 0.5) or "Negative"
         """
-        if probability < self.RISK_THRESHOLDS["low"]:
-            return "low"
-        elif probability < self.RISK_THRESHOLDS["borderline"]:
-            return "borderline"
-        else:
-            return "high"
+        return "Positive" if probability >= 0.5 else "Negative"
     
     def update_weights(self, new_weights: Dict[str, float]):
         """

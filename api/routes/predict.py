@@ -1,4 +1,5 @@
 import os
+import uuid
 import shutil
 import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
@@ -32,8 +33,9 @@ async def predict(
     neuroimaging: list[UploadFile] = File(default=[]),
 ):
     user_id = user["user_id"]
+    job_id = job_id or str(uuid.uuid4())
 
-    staging_dir = f"/tmp/staging_{job_id or user_id}_{os.getpid()}"
+    staging_dir = f"/tmp/staging_{job_id}_{os.getpid()}"
     os.makedirs(staging_dir, exist_ok=True)
 
     input_paths: dict[str, list[str]] = {}
@@ -69,7 +71,7 @@ async def predict(
         if not input_paths:
             raise HTTPException(status_code=400, detail="No files received")
 
-        fused = run_inference(patient_id=patient_id, input_paths=input_paths)
+        fused = run_inference(patient_id=patient_id, input_paths=input_paths, job_id=job_id)
 
         if patient_uuid:
             fused.patient_uuid = patient_uuid
@@ -103,5 +105,6 @@ async def predict(
         ci_high=fused.ci_high,
         modality_weights=fused.modality_weights,
         available_modalities=[r.modality for r in fused.modality_results if r.available],
+        fusion_model_version=fused.fusion_model_version,
         warning=warning,
     )

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_key: str
     supabase_anon_key: str        # needed for JWKS fetch (/auth/v1/keys requires apikey header)
+    supabase_jwt_secret: str
 
     # Gemini (GenAI)
     gemini_api_key: str

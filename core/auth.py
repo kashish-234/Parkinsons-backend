@@ -1,92 +1,50 @@
-import time
+import logging
 import requests
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt, JWTError
 
 from core.config import settings
 
+logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=True)
-
-JWKS_URL = f"{settings.supabase_url}/auth/v1/keys"
-
-_jwks_cache: dict | None = None
-_jwks_last_fetched: float = 0
-_JWKS_TTL = 3600  # 1 hour
-
-
-def _get_jwks() -> dict:
-    global _jwks_cache, _jwks_last_fetched
-
-    if _jwks_cache is None or time.time() - _jwks_last_fetched > _JWKS_TTL:
-        try:
-            # Supabase requires the anon key as apikey header on all /auth/v1/* endpoints
-            res = requests.get(
-                JWKS_URL,
-                headers={"apikey": settings.supabase_anon_key},
-                timeout=10,
-            )
-            res.raise_for_status()
-            _jwks_cache = res.json()
-            _jwks_last_fetched = time.time()
-        except Exception as e:
-            if _jwks_cache is not None:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"JWKS refresh failed ({e}); using stale cache."
-                )
-            else:
-                raise RuntimeError(f"Cannot fetch JWKS from Supabase: {e}") from e
-
-    return _jwks_cache
 
 
 def verify_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
+    """
+    Verify a Supabase JWT by calling Supabase's /auth/v1/user endpoint.
+    Supabase validates the token (any algorithm) and returns the user.
+    No local key management needed — works with HS256, ES256, or any future algo.
+    """
     token = credentials.credentials
 
     try:
-        jwks = _get_jwks()
-        unverified_header = jwt.get_unverified_header(token)
-        kid = unverified_header.get("kid")
-
-        key = next(
-            (k for k in jwks.get("keys", []) if k.get("kid") == kid),
-            None,
+        res = requests.get(
+            f"{settings.supabase_url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": settings.supabase_anon_key,
+            },
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        logger.error("Supabase auth request failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Auth service unavailable",
         )
 
-        if key is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token: signing key not found",
-            )
-
-        issuer = f"{settings.supabase_url}/auth/v1"
-
-        payload = jwt.decode(
-            token,
-            key,
-            algorithms=["RS256"],
-            audience="authenticated",
-            issuer=issuer,
-        )
-
-        return {
-            "user_id": payload.get("sub"),
-            "email": payload.get("email"),
-            "role": payload.get("user_metadata", {}).get("role", "user"),
-        }
-
-    except JWTError as e:
+    if res.status_code != 200:
+        logger.warning("Supabase rejected token: %s %s", res.status_code, res.text[:200])
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {e}",
+            detail="Invalid or expired token",
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Auth error: {e}",
-        )
+
+    user = res.json()
+    return {
+        "user_id": user.get("id"),
+        "email": user.get("email"),
+        "role": user.get("user_metadata", {}).get("role", "user"),
+    }

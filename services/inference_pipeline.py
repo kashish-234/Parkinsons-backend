@@ -362,8 +362,8 @@ def _run_handwriting_inference(paths: List[str]) -> ModalityResult:
 # Main pipeline
 # ============================================================================
 
-def run_inference(patient_id: str, input_paths: Dict[str, List[str]]) -> FusedResult:
-    job_id = str(uuid.uuid4())
+def run_inference(patient_id: str, input_paths: Dict[str, List[str]], job_id: str = None) -> FusedResult:
+    job_id = job_id or str(uuid.uuid4())
 
     submitted = [m for m, paths in input_paths.items() if paths]
     logger.info(f"Job {job_id} | patient {patient_id} | submitted: {submitted}")

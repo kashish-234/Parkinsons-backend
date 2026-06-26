@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from typing import Dict
 import logging
 
 from api.schemas import ReportResponse
@@ -21,11 +22,18 @@ router = APIRouter()
 
 def _build_report_response(job_id: str, existing: dict) -> ReportResponse:
     """Build a ReportResponse from a DB row returned by get_report()."""
+    raw = existing.get("report_sections") or {}
+    # Ensure it's Dict[str, str] whether stored as dict or Pydantic model
+    if isinstance(raw, dict):
+        sections: Dict[str, str] = {k: str(v) for k, v in raw.items()}
+    else:
+        sections = {}
+
     return ReportResponse(
         job_id=job_id,
-        report_sections=existing["report_sections"],
+        report_sections=sections,
         n_similar_cases_used=len(existing.get("retrieved_cases") or []),
-        llm_model=existing["llm_model"],
+        llm_model=existing.get("llm_model", "gemini"),
         generated_at=existing.get("generated_at"),
     )
 
